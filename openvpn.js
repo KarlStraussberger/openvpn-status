@@ -1,5 +1,6 @@
 const {EventEmitter} = require('events')
 const net = require('net')
+const Netmask = require('netmask').Netmask
 
 const mkClient = (data, original = {}) => {
   const candidate = {
@@ -29,12 +30,22 @@ const mkClient = (data, original = {}) => {
 
 const STATE = {idle: Symbol('idle'), status: Symbol('status')}
 class client extends EventEmitter {
-  constructor(host, port, pwd = null) {
+  constructor(host, port, pwd = null, netmask = null) {
     super()
     this.state = STATE.idle
     this.host = host
     this.port = port
     this.pwd = pwd
+    this.netmask = new Netmask ('0.0.0.0/0')
+    if (netmask != null) {
+        try {
+          const nm = new Netmask(netmask);
+          this.netmask = nm;
+        } catch (error) {
+          console.log(`Could not parse netmask ${netmask}`);
+          console.log(error);
+        }
+    }
     this.alive = false
     this.clientRes = false
     this.clientProps = []
@@ -44,7 +55,13 @@ class client extends EventEmitter {
     this.connected = false
     this.socket.on('data', data => {
       const items = data.toString().split('\r\n').filter(itm => itm.length)
-      items.forEach(itm => this.procData(itm.toString()))
+      items.forEach(itm => {
+        try {
+          this.procData(itm.toString());
+        } catch (error) {
+          console.log(`Could not process data item ${itm.toString()}`);
+          console.log(error);
+        }});
     })
     this.socket.on('error', () => {
       this.connected = false
@@ -85,14 +102,19 @@ class client extends EventEmitter {
       }
     } else if (data.startsWith('ROUTING_TABLE') && this.state === STATE.status) {
       const props = data.split('\t').slice(1, data.length + 1)
-      const [pub, port] = props[this.clientProps.indexOf('Real Address')].split(':')
-      const client = Array.from(this.clients.values()).find((client) => client.pub === pub && client.port === port)
-      if (client) {
-        const vpnClient = this.clientProps.reduce((acc, prop, idx) => {
-          acc[prop] = prepProperty(props[idx])
-          return acc
-        }, {})
-        mkClient(vpnClient, client)
+      const realAddressIndex = this.clientProps.indexOf('Real Address');
+      if (realAddressIndex < props.length) {
+        const [pub, port] = props[realAddressIndex].split(':')
+        const client = Array.from(this.clients.values()).find((client) => client.pub === pub && client.port === port && this.netmask.contains(client.pub))
+        if (client) {
+          const vpnClient = this.clientProps.reduce((acc, prop, idx) => {
+            acc[prop] = prepProperty(props[idx])
+            return acc
+          }, {})
+          mkClient(vpnClient, client)
+        }
+      } else {
+         console.log(`props truncated ${data}`);
       }
     } else if (data.startsWith('END') && this.state === STATE.status) {
       this.oldClients.forEach((client, key) => {
